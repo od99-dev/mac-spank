@@ -16,6 +16,7 @@ func resetGlobals() {
 	minAmplitude = 0.05
 	cooldownMs = 750
 	stdioMode = true
+	volumeScaling = false
 }
 
 func TestPauseCommand(t *testing.T) {
@@ -179,6 +180,41 @@ func TestSetAmplitudeOutOfRange(t *testing.T) {
 	}
 }
 
+func TestVolumeScalingCommand(t *testing.T) {
+	resetGlobals()
+
+	// Toggle on
+	input := `{"cmd":"volume-scaling"}` + "\n"
+	var output bytes.Buffer
+	processCommands(strings.NewReader(input), &output)
+
+	if !volumeScaling {
+		t.Error("expected volumeScaling to be true after toggle")
+	}
+
+	var resp struct {
+		Status        string `json:"status"`
+		VolumeScaling bool   `json:"volume_scaling"`
+	}
+	if err := json.Unmarshal(output.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+	if resp.Status != "volume_scaling_toggled" {
+		t.Errorf("expected status 'volume_scaling_toggled', got %q", resp.Status)
+	}
+	if !resp.VolumeScaling {
+		t.Error("expected volume_scaling true in response")
+	}
+
+	// Toggle off
+	output.Reset()
+	processCommands(strings.NewReader(input), &output)
+
+	if volumeScaling {
+		t.Error("expected volumeScaling to be false after second toggle")
+	}
+}
+
 func TestStatusCommand(t *testing.T) {
 	resetGlobals()
 	minAmplitude = 0.1
@@ -190,10 +226,11 @@ func TestStatusCommand(t *testing.T) {
 	processCommands(strings.NewReader(input), &output)
 
 	var resp struct {
-		Status    string  `json:"status"`
-		Paused    bool    `json:"paused"`
-		Amplitude float64 `json:"amplitude"`
-		Cooldown  int     `json:"cooldown"`
+		Status        string  `json:"status"`
+		Paused        bool    `json:"paused"`
+		Amplitude     float64 `json:"amplitude"`
+		Cooldown      int     `json:"cooldown"`
+		VolumeScaling bool    `json:"volume_scaling"`
 	}
 	if err := json.Unmarshal(output.Bytes(), &resp); err != nil {
 		t.Fatalf("failed to parse response: %v", err)
@@ -209,6 +246,9 @@ func TestStatusCommand(t *testing.T) {
 	}
 	if resp.Cooldown != 600 {
 		t.Errorf("expected cooldown 600, got %d", resp.Cooldown)
+	}
+	if resp.VolumeScaling != false {
+		t.Errorf("expected volume_scaling false, got %t", resp.VolumeScaling)
 	}
 }
 

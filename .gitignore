@@ -2,3 +2,4 @@
 dist/
 *.log
 .crush
+spank.test

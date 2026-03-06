@@ -51,9 +51,10 @@ var (
 	fastMode     bool
 	minAmplitude float64
 	cooldownMs   int
-	stdioMode    bool
-	paused       bool
-	pausedMu     sync.RWMutex
+	stdioMode      bool
+	volumeScaling  bool
+	paused         bool
+	pausedMu       sync.RWMutex
 )
 
 // sensorReady is closed once shared memory is created and the sensor
@@ -254,6 +255,7 @@ Use --halo to play random audio clips from Halo soundtracks on each slap.`,
 	cmd.Flags().Float64Var(&minAmplitude, "min-amplitude", defaultMinAmplitude, "Minimum amplitude threshold (0.0-1.0, lower = more sensitive)")
 	cmd.Flags().IntVar(&cooldownMs, "cooldown", defaultCooldownMs, "Cooldown between responses in milliseconds")
 	cmd.Flags().BoolVar(&stdioMode, "stdio", false, "Enable stdio mode: JSON output and stdin commands (for GUI integration)")
+	cmd.Flags().BoolVar(&volumeScaling, "volume-scaling", false, "Scale playback volume by slap amplitude (harder hits = louder)")
 
 	if err := fang.Execute(context.Background(), cmd); err != nil {
 		os.Exit(1)
@@ -523,16 +525,19 @@ func playAudio(pack *soundPack, path string, amplitude float64, speakerInit *boo
 	}
 	speakerMu.Unlock()
 
-	// Scale volume based on slap amplitude
-	vol := &effects.Volume{
-		Streamer: streamer,
-		Base:     2,
-		Volume:   amplitudeToVolume(amplitude),
-		Silent:   false,
+	// Optionally scale volume based on slap amplitude
+	var source beep.Streamer = streamer
+	if volumeScaling {
+		source = &effects.Volume{
+			Streamer: streamer,
+			Base:     2,
+			Volume:   amplitudeToVolume(amplitude),
+			Silent:   false,
+		}
 	}
 
 	done := make(chan bool)
-	speaker.Play(beep.Seq(vol, beep.Callback(func() {
+	speaker.Play(beep.Seq(source, beep.Callback(func() {
 		done <- true
 	})))
 	<-done
@@ -593,12 +598,17 @@ func processCommands(r io.Reader, w io.Writer) {
 			if stdioMode {
 				fmt.Fprintf(w, `{"status":"settings_updated","amplitude":%.4f,"cooldown":%d}%s`, minAmplitude, cooldownMs, "\n")
 			}
+		case "volume-scaling":
+			volumeScaling = !volumeScaling
+			if stdioMode {
+				fmt.Fprintf(w, `{"status":"volume_scaling_toggled","volume_scaling":%t}%s`, volumeScaling, "\n")
+			}
 		case "status":
 			pausedMu.RLock()
 			isPaused := paused
 			pausedMu.RUnlock()
 			if stdioMode {
-				fmt.Fprintf(w, `{"status":"ok","paused":%t,"amplitude":%.4f,"cooldown":%d}%s`, isPaused, minAmplitude, cooldownMs, "\n")
+				fmt.Fprintf(w, `{"status":"ok","paused":%t,"amplitude":%.4f,"cooldown":%d,"volume_scaling":%t}%s`, isPaused, minAmplitude, cooldownMs, volumeScaling, "\n")
 			}
 		default:
 			if stdioMode {
