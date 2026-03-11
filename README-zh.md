@@ -223,7 +223,7 @@ sudo launchctl unload /Library/LaunchDaemons/com.taigrr.spank.plist
 
 ## 致谢
 
-传感器读取和振动检测移植自 [olvvier/apple-silicon-accelerometer](https://github.com/olvvier/apple-silicon-accelerometer)。
+传感器读取和振动检测来源于 [olvvier/apple-silicon-accelerometer](https://github.com/olvvier/apple-silicon-accelerometer)。
 
 ## 许可证
 
