@@ -46,6 +46,7 @@ var (
 	minAmplitude  float64
 	cooldownMs    int
 	bassThreshold float64
+	afterShockMs  int
 	bassDir       string
 	snareDir      string
 	stdioMode     bool
@@ -64,7 +65,7 @@ var sensorErr = make(chan error, 1)
 
 const (
 	// defaultMinAmplitude is the default detection threshold.
-	defaultMinAmplitude = 0.03
+	defaultMinAmplitude = 0.02
 
 	// defaultCooldownMs is the default per-voice cooldown between audio responses.
 	defaultCooldownMs = 300
@@ -73,9 +74,13 @@ const (
 	defaultSpeedRatio = 1.0
 
 	// defaultBassThreshold is the amplitude above which a hit is routed to bass.
-	// Hits below this go to snare. 0.10 targets moderate taps for bass,
-	// leaving very light taps (0.03–0.10) as snare.
-	defaultBassThreshold = 0.10
+	// Hits below this go to snare. 0.07 targets light-to-moderate taps for bass,
+	// leaving very light taps (0.02–0.07) as snare.
+	defaultBassThreshold = 0.07
+
+	// defaultAfterShockMs is how long snare is suppressed after a bass hit,
+	// preventing the bass vibration decay from triggering a phantom snare.
+	defaultAfterShockMs = 150
 
 	// defaultSensorPollInterval is how often we check for new accelerometer data.
 	defaultSensorPollInterval = 10 * time.Millisecond
@@ -208,6 +213,7 @@ or point --bass-dir / --snare-dir at directories of custom MP3 files.`,
 	cmd.Flags().Float64Var(&minAmplitude, "min-amplitude", defaultMinAmplitude, "Minimum amplitude threshold (0.0-1.0, lower = more sensitive)")
 	cmd.Flags().IntVar(&cooldownMs, "cooldown", defaultCooldownMs, "Per-voice cooldown between responses in milliseconds")
 	cmd.Flags().Float64Var(&bassThreshold, "bass-threshold", defaultBassThreshold, "Amplitude at or above which a hit triggers bass (below triggers snare)")
+	cmd.Flags().IntVar(&afterShockMs, "aftershock", defaultAfterShockMs, "Milliseconds to suppress snare after a bass hit (prevents phantom snare from bass vibration decay)")
 	cmd.Flags().StringVar(&bassDir, "bass-dir", "", "Directory of custom bass MP3 files (overrides embedded)")
 	cmd.Flags().StringVar(&snareDir, "snare-dir", "", "Directory of custom snare MP3 files (overrides embedded)")
 	cmd.Flags().BoolVar(&stdioMode, "stdio", false, "Enable stdio mode: JSON output and stdin commands (for GUI integration)")
@@ -376,6 +382,10 @@ func listenForSlaps(ctx context.Context, dp *dualPack, accelRing *shm.RingBuffer
 			if time.Since(lastSnareYell) <= cooldown {
 				continue
 			}
+			// Suppress snare during bass aftershock window.
+			if time.Since(lastBassYell) <= time.Duration(afterShockMs)*time.Millisecond {
+				continue
+			}
 			lastSnareYell = now
 		}
 
@@ -494,6 +504,7 @@ type stdinCommand struct {
 	Cooldown      int     `json:"cooldown,omitempty"`
 	Speed         float64 `json:"speed,omitempty"`
 	BassThreshold float64 `json:"bassThreshold,omitempty"`
+	AfterShock    int     `json:"afterShock,omitempty"`
 }
 
 // readStdinCommands reads JSON commands from stdin for live control
@@ -547,9 +558,12 @@ func processCommands(r io.Reader, w io.Writer) {
 			if cmd.BassThreshold > 0 && cmd.BassThreshold <= 1 {
 				bassThreshold = cmd.BassThreshold
 			}
+			if cmd.AfterShock > 0 {
+				afterShockMs = cmd.AfterShock
+			}
 			if stdioMode {
-				fmt.Fprintf(w, `{"status":"settings_updated","amplitude":%.4f,"cooldown":%d,"speed":%.2f,"bass_threshold":%.4f}%s`,
-					minAmplitude, cooldownMs, speedRatio, bassThreshold, "\n")
+				fmt.Fprintf(w, `{"status":"settings_updated","amplitude":%.4f,"cooldown":%d,"speed":%.2f,"bass_threshold":%.4f,"aftershock":%d}%s`,
+					minAmplitude, cooldownMs, speedRatio, bassThreshold, afterShockMs, "\n")
 			}
 		case "volume-scaling":
 			volumeScaling = !volumeScaling
@@ -561,8 +575,8 @@ func processCommands(r io.Reader, w io.Writer) {
 			isPaused := paused
 			pausedMu.RUnlock()
 			if stdioMode {
-				fmt.Fprintf(w, `{"status":"ok","paused":%t,"amplitude":%.4f,"cooldown":%d,"volume_scaling":%t,"speed":%.2f,"bass_threshold":%.4f}%s`,
-					isPaused, minAmplitude, cooldownMs, volumeScaling, speedRatio, bassThreshold, "\n")
+				fmt.Fprintf(w, `{"status":"ok","paused":%t,"amplitude":%.4f,"cooldown":%d,"volume_scaling":%t,"speed":%.2f,"bass_threshold":%.4f,"aftershock":%d}%s`,
+					isPaused, minAmplitude, cooldownMs, volumeScaling, speedRatio, bassThreshold, afterShockMs, "\n")
 			}
 		default:
 			if stdioMode {
