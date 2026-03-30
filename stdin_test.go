@@ -13,7 +13,7 @@ func resetGlobals() {
 	pausedMu.Lock()
 	paused = false
 	pausedMu.Unlock()
-	minAmplitude = 0.05
+	minAmplitude = defaultMinAmplitude
 	cooldownMs = defaultCooldownMs
 	bassThreshold = defaultBassThreshold
 	stdioMode = true

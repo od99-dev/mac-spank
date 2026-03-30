@@ -64,7 +64,7 @@ var sensorErr = make(chan error, 1)
 
 const (
 	// defaultMinAmplitude is the default detection threshold.
-	defaultMinAmplitude = 0.05
+	defaultMinAmplitude = 0.03
 
 	// defaultCooldownMs is the default per-voice cooldown between audio responses.
 	defaultCooldownMs = 300
@@ -73,8 +73,9 @@ const (
 	defaultSpeedRatio = 1.0
 
 	// defaultBassThreshold is the amplitude above which a hit is routed to bass.
-	// Hits below this go to snare. 0.25 separates light taps from center hits.
-	defaultBassThreshold = 0.25
+	// Hits below this go to snare. 0.10 targets moderate taps for bass,
+	// leaving very light taps (0.03–0.10) as snare.
+	defaultBassThreshold = 0.10
 
 	// defaultSensorPollInterval is how often we check for new accelerometer data.
 	defaultSensorPollInterval = 10 * time.Millisecond
