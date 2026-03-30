@@ -14,7 +14,8 @@ func resetGlobals() {
 	paused = false
 	pausedMu.Unlock()
 	minAmplitude = 0.05
-	cooldownMs = 750
+	cooldownMs = defaultCooldownMs
+	bassThreshold = defaultBassThreshold
 	stdioMode = true
 	volumeScaling = false
 }
@@ -112,7 +113,6 @@ func TestSetCooldownCommand(t *testing.T) {
 
 	processCommands(strings.NewReader(input), &output)
 
-	// Check state changed
 	if cooldownMs != 500 {
 		t.Errorf("expected cooldownMs 500, got %d", cooldownMs)
 	}
