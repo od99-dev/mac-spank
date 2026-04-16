@@ -15,6 +15,7 @@ func resetGlobals() {
 	pausedMu.Unlock()
 	minAmplitude = 0.05
 	cooldownMs = defaultCooldownMs
+	toneThreshold = defaultToneThreshold
 	bassThreshold = defaultBassThreshold
 	stdioMode = true
 	volumeScaling = false
@@ -143,6 +144,56 @@ func TestSetBothCommand(t *testing.T) {
 	}
 	if cooldownMs != 1000 {
 		t.Errorf("expected cooldownMs 1000, got %d", cooldownMs)
+	}
+}
+
+func TestSetToneThresholdCommand(t *testing.T) {
+	resetGlobals()
+
+	input := `{"cmd":"set","toneThreshold":0.12}` + "\n"
+	var output bytes.Buffer
+
+	processCommands(strings.NewReader(input), &output)
+
+	if toneThreshold != 0.12 {
+		t.Errorf("expected toneThreshold 0.12, got %f", toneThreshold)
+	}
+
+	var resp struct {
+		Status        string  `json:"status"`
+		ToneThreshold float64 `json:"tone_threshold"`
+		BassThreshold float64 `json:"bass_threshold"`
+	}
+	if err := json.Unmarshal(output.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+	if resp.Status != "settings_updated" {
+		t.Errorf("expected status 'settings_updated', got %q", resp.Status)
+	}
+	if resp.ToneThreshold != 0.12 {
+		t.Errorf("expected tone_threshold 0.12 in response, got %f", resp.ToneThreshold)
+	}
+}
+
+func TestSetToneThresholdOutOfRange(t *testing.T) {
+	resetGlobals()
+	original := toneThreshold
+
+	// tone threshold >= bassThreshold should be ignored
+	input := `{"cmd":"set","toneThreshold":0.30}` + "\n"
+	var output bytes.Buffer
+	processCommands(strings.NewReader(input), &output)
+	if toneThreshold != original {
+		t.Errorf("toneThreshold should not change when >= bassThreshold, got %f", toneThreshold)
+	}
+
+	// tone threshold <= 0 should be ignored
+	resetGlobals()
+	input = `{"cmd":"set","toneThreshold":0}` + "\n"
+	output.Reset()
+	processCommands(strings.NewReader(input), &output)
+	if toneThreshold != original {
+		t.Errorf("toneThreshold should not change for value <= 0, got %f", toneThreshold)
 	}
 }
 

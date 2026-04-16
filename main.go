@@ -41,13 +41,18 @@ var djembeBassAudio embed.FS
 //go:embed audio/djembe/snare/*.mp3
 var djembeSnareAudio embed.FS
 
+//go:embed audio/djembe/tone/*.mp3
+var djembeToneAudio embed.FS
+
 var (
 	fastMode      bool
 	minAmplitude  float64
 	cooldownMs    int
 	bassThreshold float64
+	toneThreshold float64
 	bassDir       string
 	snareDir      string
+	toneDir       string
 	stdioMode     bool
 	volumeScaling bool
 	paused        bool
@@ -72,8 +77,13 @@ const (
 	// defaultSpeedRatio is the default playback speed (1.0 = normal).
 	defaultSpeedRatio = 1.0
 
+	// defaultToneThreshold is the amplitude above which a hit is routed to tone.
+	// Hits below this go to snare. 0.10 separates very light taps from medium hits.
+	defaultToneThreshold = 0.10
+
 	// defaultBassThreshold is the amplitude above which a hit is routed to bass.
-	// Hits below this go to snare. 0.25 separates light taps from center hits.
+	// Hits at or above tone threshold but below this go to tone. 0.25 separates
+	// medium hits from center bass hits.
 	defaultBassThreshold = 0.25
 
 	// defaultSensorPollInterval is how often we check for new accelerometer data.
@@ -154,21 +164,27 @@ func (sp *soundPack) loadFiles() error {
 	return nil
 }
 
-// dualPack holds bass and snare voices and routes hits by amplitude threshold.
-type dualPack struct {
+// triPack holds bass, tone, and snare voices and routes hits by amplitude thresholds.
+type triPack struct {
 	bass  *soundPack
+	tone  *soundPack
 	snare *soundPack
 }
 
 // selectVoice returns the pack, a randomly chosen file, and the voice name
-// ("bass" or "snare") based on amplitude vs bassThreshold.
-func (dp *dualPack) selectVoice(amplitude float64) (*soundPack, string, string) {
+// ("bass", "tone", or "snare") based on amplitude vs the two thresholds.
+// amplitude >= bassThreshold → bass; >= toneThreshold → tone; else → snare.
+func (tp *triPack) selectVoice(amplitude float64) (*soundPack, string, string) {
 	if amplitude >= bassThreshold {
-		file := dp.bass.files[rand.Intn(len(dp.bass.files))]
-		return dp.bass, file, "bass"
+		file := tp.bass.files[rand.Intn(len(tp.bass.files))]
+		return tp.bass, file, "bass"
 	}
-	file := dp.snare.files[rand.Intn(len(dp.snare.files))]
-	return dp.snare, file, "snare"
+	if amplitude >= toneThreshold {
+		file := tp.tone.files[rand.Intn(len(tp.tone.files))]
+		return tp.tone, file, "tone"
+	}
+	file := tp.snare.files[rand.Intn(len(tp.snare.files))]
+	return tp.snare, file, "snare"
 }
 
 func main() {
@@ -178,13 +194,18 @@ func main() {
 		Long: `spank reads the Apple Silicon accelerometer directly via IOKit HID
 and plays djembe drum sounds when a hit is detected.
 
-Hard hits (amplitude >= bass-threshold) trigger bass sounds.
-Lighter hits trigger snare sounds. Both voices can play simultaneously.
+Three voices are selected by amplitude:
+  amplitude >= bass-threshold  → bass  (hard center hits)
+  amplitude >= tone-threshold  → tone  (medium hits)
+  amplitude <  tone-threshold  → snare (light taps)
+
+All three voices can play simultaneously with independent cooldowns.
 
 Requires sudo (for IOKit HID access to the accelerometer).
 
-Replace audio/djembe/bass/ and audio/djembe/snare/ with your own MP3s,
-or point --bass-dir / --snare-dir at directories of custom MP3 files.`,
+Replace audio/djembe/bass/, audio/djembe/tone/, and audio/djembe/snare/
+with your own MP3s, or point --bass-dir / --tone-dir / --snare-dir at
+directories of custom MP3 files.`,
 		Version: version,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			tuning := defaultTuning()
@@ -206,8 +227,10 @@ or point --bass-dir / --snare-dir at directories of custom MP3 files.`,
 	cmd.Flags().BoolVar(&fastMode, "fast", false, "Enable faster detection tuning (shorter cooldown, higher sensitivity)")
 	cmd.Flags().Float64Var(&minAmplitude, "min-amplitude", defaultMinAmplitude, "Minimum amplitude threshold (0.0-1.0, lower = more sensitive)")
 	cmd.Flags().IntVar(&cooldownMs, "cooldown", defaultCooldownMs, "Per-voice cooldown between responses in milliseconds")
-	cmd.Flags().Float64Var(&bassThreshold, "bass-threshold", defaultBassThreshold, "Amplitude at or above which a hit triggers bass (below triggers snare)")
+	cmd.Flags().Float64Var(&toneThreshold, "tone-threshold", defaultToneThreshold, "Amplitude at or above which a hit triggers tone instead of snare (must be < bass-threshold)")
+	cmd.Flags().Float64Var(&bassThreshold, "bass-threshold", defaultBassThreshold, "Amplitude at or above which a hit triggers bass (must be > tone-threshold)")
 	cmd.Flags().StringVar(&bassDir, "bass-dir", "", "Directory of custom bass MP3 files (overrides embedded)")
+	cmd.Flags().StringVar(&toneDir, "tone-dir", "", "Directory of custom tone MP3 files (overrides embedded)")
 	cmd.Flags().StringVar(&snareDir, "snare-dir", "", "Directory of custom snare MP3 files (overrides embedded)")
 	cmd.Flags().BoolVar(&stdioMode, "stdio", false, "Enable stdio mode: JSON output and stdin commands (for GUI integration)")
 	cmd.Flags().BoolVar(&volumeScaling, "volume-scaling", false, "Scale playback volume by slap amplitude (harder hits = louder)")
@@ -229,15 +252,23 @@ func run(ctx context.Context, tuning runtimeTuning) error {
 	if tuning.cooldown <= 0 {
 		return fmt.Errorf("--cooldown must be greater than 0")
 	}
+	if toneThreshold <= 0 || toneThreshold >= bassThreshold {
+		return fmt.Errorf("--tone-threshold must be between 0.0 and bass-threshold (%.2f)", bassThreshold)
+	}
 	if bassThreshold <= 0 || bassThreshold > 1 {
 		return fmt.Errorf("--bass-threshold must be between 0.0 and 1.0")
 	}
 
-	var bassPack, snarePack *soundPack
+	var bassPack, tonePack, snarePack *soundPack
 	if bassDir != "" {
 		bassPack = &soundPack{dir: bassDir, custom: true}
 	} else {
 		bassPack = &soundPack{fs: djembeBassAudio, dir: "audio/djembe/bass"}
+	}
+	if toneDir != "" {
+		tonePack = &soundPack{dir: toneDir, custom: true}
+	} else {
+		tonePack = &soundPack{fs: djembeToneAudio, dir: "audio/djembe/tone"}
 	}
 	if snareDir != "" {
 		snarePack = &soundPack{dir: snareDir, custom: true}
@@ -248,11 +279,14 @@ func run(ctx context.Context, tuning runtimeTuning) error {
 	if err := bassPack.loadFiles(); err != nil {
 		return fmt.Errorf("loading bass audio: %w", err)
 	}
+	if err := tonePack.loadFiles(); err != nil {
+		return fmt.Errorf("loading tone audio: %w", err)
+	}
 	if err := snarePack.loadFiles(); err != nil {
 		return fmt.Errorf("loading snare audio: %w", err)
 	}
 
-	dp := &dualPack{bass: bassPack, snare: snarePack}
+	dp := &triPack{bass: bassPack, tone: tonePack, snare: snarePack}
 
 	ctx, cancel := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -290,12 +324,13 @@ func run(ctx context.Context, tuning runtimeTuning) error {
 	return listenForSlaps(ctx, dp, accelRing, tuning)
 }
 
-func listenForSlaps(ctx context.Context, dp *dualPack, accelRing *shm.RingBuffer, tuning runtimeTuning) error {
+func listenForSlaps(ctx context.Context, dp *triPack, accelRing *shm.RingBuffer, tuning runtimeTuning) error {
 	speakerInit := false
 	det := detector.New()
 	var lastAccelTotal uint64
 	var lastEventTime time.Time
 	var lastBassYell time.Time
+	var lastToneYell time.Time
 	var lastSnareYell time.Time
 	hitCount := 0
 
@@ -307,7 +342,7 @@ func listenForSlaps(ctx context.Context, dp *dualPack, accelRing *shm.RingBuffer
 	if fastMode {
 		presetLabel = "fast"
 	}
-	fmt.Printf("spank: djembe mode (%s tuning, bass>=%.2f)... (ctrl+c to quit)\n", presetLabel, bassThreshold)
+	fmt.Printf("spank: djembe mode (%s tuning, tone>=%.2f, bass>=%.2f)... (ctrl+c to quit)\n", presetLabel, toneThreshold, bassThreshold)
 	if stdioMode {
 		fmt.Println(`{"status":"ready"}`)
 	}
@@ -362,7 +397,7 @@ func listenForSlaps(ctx context.Context, dp *dualPack, accelRing *shm.RingBuffer
 			continue
 		}
 
-		// Route to bass or snare, enforce per-voice cooldown.
+		// Route to bass, tone, or snare; enforce per-voice cooldown.
 		sp, file, voice := dp.selectVoice(ev.Amplitude)
 		cooldown := tuning.cooldown
 		switch voice {
@@ -371,6 +406,11 @@ func listenForSlaps(ctx context.Context, dp *dualPack, accelRing *shm.RingBuffer
 				continue
 			}
 			lastBassYell = now
+		case "tone":
+			if time.Since(lastToneYell) <= cooldown {
+				continue
+			}
+			lastToneYell = now
 		case "snare":
 			if time.Since(lastSnareYell) <= cooldown {
 				continue
@@ -492,6 +532,7 @@ type stdinCommand struct {
 	Amplitude     float64 `json:"amplitude,omitempty"`
 	Cooldown      int     `json:"cooldown,omitempty"`
 	Speed         float64 `json:"speed,omitempty"`
+	ToneThreshold float64 `json:"toneThreshold,omitempty"`
 	BassThreshold float64 `json:"bassThreshold,omitempty"`
 }
 
@@ -543,12 +584,15 @@ func processCommands(r io.Reader, w io.Writer) {
 			if cmd.Speed > 0 {
 				speedRatio = cmd.Speed
 			}
+			if cmd.ToneThreshold > 0 && cmd.ToneThreshold < bassThreshold {
+				toneThreshold = cmd.ToneThreshold
+			}
 			if cmd.BassThreshold > 0 && cmd.BassThreshold <= 1 {
 				bassThreshold = cmd.BassThreshold
 			}
 			if stdioMode {
-				fmt.Fprintf(w, `{"status":"settings_updated","amplitude":%.4f,"cooldown":%d,"speed":%.2f,"bass_threshold":%.4f}%s`,
-					minAmplitude, cooldownMs, speedRatio, bassThreshold, "\n")
+				fmt.Fprintf(w, `{"status":"settings_updated","amplitude":%.4f,"cooldown":%d,"speed":%.2f,"tone_threshold":%.4f,"bass_threshold":%.4f}%s`,
+					minAmplitude, cooldownMs, speedRatio, toneThreshold, bassThreshold, "\n")
 			}
 		case "volume-scaling":
 			volumeScaling = !volumeScaling
@@ -560,8 +604,8 @@ func processCommands(r io.Reader, w io.Writer) {
 			isPaused := paused
 			pausedMu.RUnlock()
 			if stdioMode {
-				fmt.Fprintf(w, `{"status":"ok","paused":%t,"amplitude":%.4f,"cooldown":%d,"volume_scaling":%t,"speed":%.2f,"bass_threshold":%.4f}%s`,
-					isPaused, minAmplitude, cooldownMs, volumeScaling, speedRatio, bassThreshold, "\n")
+				fmt.Fprintf(w, `{"status":"ok","paused":%t,"amplitude":%.4f,"cooldown":%d,"volume_scaling":%t,"speed":%.2f,"tone_threshold":%.4f,"bass_threshold":%.4f}%s`,
+					isPaused, minAmplitude, cooldownMs, volumeScaling, speedRatio, toneThreshold, bassThreshold, "\n")
 			}
 		default:
 			if stdioMode {
